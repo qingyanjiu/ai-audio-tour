@@ -112,6 +112,7 @@ def main():
     cmd = [
         chrome,
         f"--remote-debugging-port={args.port}",
+        "--remote-allow-origins=*",
         f"--user-data-dir={data_dir}",
         url,
     ]
@@ -129,6 +130,10 @@ def main():
 
     subprocess.Popen(cmd, **kwargs)
     print("✅ Chrome 已启动，可以关闭本窗口。")
+    print()
+    print("验证方法（新终端执行）：")
+    print(f"  curl http://127.0.0.1:{args.port}/json/version")
+    print(f"  curl http://127.0.0.1:{args.port}/json")
 
 
 if __name__ == "__main__":

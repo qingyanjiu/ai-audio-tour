@@ -7,13 +7,38 @@ CDP 截图服务模块
 
 import asyncio
 import base64
+import http.client
 import json
+import time
 from pathlib import Path
 
 import websockets
-
 from .config_loader import get_screenshot_config
 
+
+def _fetch_json(host: str, port: int, path: str) -> list | dict:
+    """通过 HTTP 获取 CDP 控制端点 JSON"""
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    try:
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        body = resp.read().decode()
+        return json.loads(body)
+    finally:
+        conn.close()
+
+
+async def _get_browser_ws_url(host: str, port: int) -> str:
+    """从 CDP HTTP 端点获取浏览器级 WebSocket URL（含 UUID）"""
+    info = await asyncio.get_running_loop().run_in_executor(
+        None, _fetch_json, host, port, "/json/version"
+    )
+    if isinstance(info, dict) and "webSocketDebuggerUrl" in info:
+        return info["webSocketDebuggerUrl"]
+    raise RuntimeError(
+        f"CDP 端点未返回 webSocketDebuggerUrl。"
+        f"请确认 Chrome 已用 --remote-debugging-port={port} 启动"
+    )
 
 def _get_page_url(menu_name: str | None = None) -> str | None:
     """根据菜单名称从配置中查找对应的页面 URL"""
@@ -29,44 +54,63 @@ def _get_page_url(menu_name: str | None = None) -> str | None:
 
 
 async def capture_page(
-    ws_url: str = "ws://127.0.0.1:9222/devtools/browser",
+    host: str = "127.0.0.1",
+    port: int = 9222,
     url_filter: str | None = None,
 ) -> bytes:
     """通过 CDP 截图，返回 JPEG 字节"""
-    async with websockets.connect(ws_url) as ws:
-        # 1. 获取所有标签页
-        await ws.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
-        resp = json.loads(await ws.recv())
-        targets = resp.get("result", {}).get("targetInfos", [])
+    # 1. 从 HTTP 端点获取所有标签页，直接取目标页面的 WebSocket URL
+    targets = await asyncio.get_running_loop().run_in_executor(
+        None, _fetch_json, host, port, "/json"
+    )
+    if not isinstance(targets, list):
+        raise RuntimeError(f"CDP /json 返回非列表: {targets}")
 
-        # 2. 找目标页面（优先匹配 url_filter，否则取第一个页面）
-        tid = None
-        for t in targets:
-            if t.get("type") == "page":
-                if url_filter and url_filter in t.get("url", ""):
-                    tid = t["targetId"]
-                    break
-                if tid is None:
-                    tid = t["targetId"]
+    # 2. 找目标页面
+    page = None
+    for t in targets:
+        if t.get("type") != "page":
+            continue
+        if url_filter and url_filter in t.get("url", ""):
+            page = t
+            break
+        if page is None:
+            page = t
 
-        if not tid:
-            raise RuntimeError("没有可用页面。请确认 Chrome 已打开大屏页面")
+    if not page:
+        raise RuntimeError(
+            "没有可用页面。请确认 Chrome 已打开大屏页面\n"
+            f"可用 targets: {[(t.get('type'), t.get('url','')[:60]) for t in targets]}"
+        )
 
-        # 3. 附加到目标页面
+    # 3. 直接连到目标页面的 WebSocket（页面级，免 session 管理）
+    page_ws = page["webSocketDebuggerUrl"]
+    if not page_ws:
+        raise RuntimeError(f"页面没有 WebSocket 地址: {page}")
+
+    async with websockets.connect(page_ws) as ws:
+        # 4. 启用 Page 域（某些 Chrome 版本需要）
+        await ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
+        r = json.loads(await ws.recv())
+        if "error" in r:
+            # Page.enable 失败不致命，继续尝试截图
+            pass
+
+        # 5. 截图
         await ws.send(json.dumps({
-            "id": 2, "method": "Target.attachToTarget",
-            "params": {"targetId": tid, "flatten": True},
-        }))
-        sess = json.loads(await ws.recv()).get("result", {}).get("sessionId")
-
-        # 4. 截图
-        await ws.send(json.dumps({
-            "id": 3, "sessionId": sess,
+            "id": 2,
             "method": "Page.captureScreenshot",
             "params": {"format": "jpeg", "quality": 85},
         }))
-        b64 = json.loads(await ws.recv()).get("result", {}).get("data", "")
-        return base64.b64decode(b64)
+        msg = json.loads(await ws.recv())
+        if "error" in msg:
+            raise RuntimeError(f"截图失败: {msg['error']}")
+        b64 = msg.get("result", {}).get("data", "")
+        if not b64:
+            raise RuntimeError(
+                f"截图数据为空，响应: {json.dumps(msg, ensure_ascii=False)[:500]}"
+            )
+    return base64.b64decode(b64)
 
 
 async def capture_and_save(
@@ -86,14 +130,15 @@ async def capture_and_save(
         (jpeg_bytes, filename, timestamp)
     """
     cfg = get_screenshot_config()
+    host = cfg.get("cdp_host", "127.0.0.1")
+    port = cfg.get("cdp_port", 9222)
     page_url = _get_page_url(menu_name)
-    ws_url = f"ws://{cfg.get('cdp_host', '127.0.0.1')}:{cfg.get('cdp_port', 9222)}/devtools/browser"
 
     if timestamp is None:
-        timestamp = str(int(asyncio.get_event_loop().time()))
+        timestamp = str(int(time.time()))
 
     # 截图
-    jpeg_bytes = await capture_page(ws_url=ws_url, url_filter=page_url)
+    jpeg_bytes = await capture_page(host=host, port=port, url_filter=page_url)
 
     # 保存
     out_dir = Path(output_dir or cfg.get("output_dir", "./screenshots"))

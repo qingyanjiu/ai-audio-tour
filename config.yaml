@@ -37,3 +37,19 @@ screenshot:
       url: http://localhost:555/3.html
   # 截图保存目录
   output_dir: ./screenshots
+
+# ============================================================
+# TTS 语音合成配置（Kokoro-TTS）
+# ============================================================
+
+tts:
+  enabled: true
+  provider: kokoro
+  # 讲解音色：female（女声）/ male（男声），或直接填写音色名如 zf_xiaobei
+  voice: female
+  speed: 1.0
+  sample_rate: 24000
+  # 句间静音间隔（秒），使合成语音听起来更自然
+  silence_sec: 0.3
+  # 运行设备：auto（自动）/ cuda（N 卡）/ cpu
+  device: auto
