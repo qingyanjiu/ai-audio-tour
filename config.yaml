@@ -29,12 +29,8 @@ screenshot:
 
   # 大屏页面地址，多个页面可配置
   urls:
-    - name: 智慧安防
-      url: http://localhost:555/1.html
-    - name: 智慧能源
-      url: http://localhost:555/2.html
-    - name: 智慧通行
-      url: http://localhost:555/3.html
+  - name: 智慧安防
+    url: http://localhost:555/1.html
   # 截图保存目录
   output_dir: ./screenshots
 
